@@ -1,0 +1,362 @@
+use role accountadmin;
+create or replace api integration dora_api_integration api_provider = aws_api_gateway api_aws_role_arn = 'arn:aws:iam::321463406630:role/snowflakeLearnerAssumedRole' enabled = true api_allowed_prefixes = ('https://awy6hshxy4.execute-api.us-west-2.amazonaws.com/dev/edu_dora');
+
+show integrations
+
+use role accountadmin;
+
+create or replace external function util_db.public.grader(        
+ step varchar     
+ , passed boolean     
+ , actual integer     
+ , expected integer    
+ , description varchar) 
+ returns variant 
+ api_integration = dora_api_integration 
+ context_headers = (current_timestamp,current_account, current_statement) 
+ as 'https://awy6hshxy4.execute-api.us-west-2.amazonaws.com/dev/edu_dora/grader'  
+;  
+
+
+use role accountadmin;
+
+select util_db.public.grader(step, (actual = expected), actual, expected, description) as graded_results from
+(SELECT 
+ 'DORA_IS_WORKING' as step
+ ,(select 123 ) as actual
+ ,123 as expected
+ ,'Dora is working!' as description
+); 
+
+select current_account()
+
+create or replace external function util_db.public.greeting(
+      email varchar
+    , firstname varchar
+    , middlename varchar
+    , lastname varchar)
+returns variant
+api_integration = dora_api_integration
+context_headers = (current_timestamp,current_account, current_statement)
+as 'https://awy6hshxy4.execute-api.us-west-2.amazonaws.com/dev/edu_dora/greeting'
+;
+
+select util_db.public.greeting('renaudinjude@gmail.com', 'Jude','', 'Renaudin');
+
+--to display the content of a stage table 
+show stages;
+list @UNI_KLAUS_CLOTHING;
+
+select metadata$filename, metadata$file_row_numberfrom @uni_klaus_clothing/90s_tracksuit.png;
+
+-
+
+select * from directory(@uni_klaus_clothing);
+--to enable directory table for unstructure data 
+alter stage uni_klaus_clothing set directory = (enable = true);
+
+select * from directory(@uni_klaus_clothing);
+
+select UPPER(RELATIVE_PATH) as uppercase_filename
+, REPLACE(uppercase_filename,'/') as no_slash_filename
+, REPLACE(no_slash_filename,'_',' ') as no_underscores_filename
+, REPLACE(no_underscores_filename,'.PNG') as just_words_filename
+from directory(@uni_klaus_clothing);
+
+---nesting the product name 
+select replace(replace(replace(replace(REPLACE(RELATIVE_PATH,'/'),'_',' '), '.png'),'tracksuit'),'sweatsuit')as PRODUCT_NAME from directory(@uni_klaus_clothing)
+
+create or replace TABLE ZENAS_ATHLEISURE_DB.PRODUCTS.SWEATSUITS (
+	COLOR_OR_STYLE VARCHAR(25),
+	DIRECT_URL VARCHAR(200),
+	PRICE NUMBER(5,2)
+);
+       
+
+select * from ZENAS_ATHLEISURE_DB.PRODUCTS.SWEATSUITS
+
+
+select s.COLOR_OR_STYLE,s.DIRECT_URL,s.PRICE,d.SIZE as image_size,d.LAST_MODIFIED as image_last_modified from SWEATSUITS s join directory(@uni_klaus_clothing) d ON upper(COLOR_OR_STYLE) = trim(upper(replace(replace(replace(replace(REPLACE(RELATIVE_PATH,'/'),'_',' '), '.png'),'tracksuit'),'sweatsuit')))
+
+
+
+grant usage on VIEWS SWEATBAND_COORDINATION to role SYSADMIN;
+
+grant OWNERSHIP on FILE FORMAT ZMD_FILE_FORMAT_3 to role SYSADMIN;
+
+
+create view catalog as 
+select color_or_style
+, direct_url
+, price
+, size as image_size
+, last_modified as image_last_modified
+, sizes_available
+from sweatsuits 
+join directory(@uni_klaus_clothing) 
+on relative_path = SUBSTR(direct_url,54,50)
+cross join sweatsuit_sizes;
+
+select * from ZENAS_ATHLEISURE_DB.PRODUCTS.CATALOG
+
+
+select GRADER(step, (actual = expected), actual, expected, description) as graded_results from
+(
+ SELECT
+ 'DLKW03' as step
+ ,( select count(*) from ZENAS_ATHLEISURE_DB.PRODUCTS.CATALOG) as actual
+ ,198 as expected
+ ,'Cross-joined view exists' as description
+);
+
+
+
+create table ZENAS_ATHLEISURE_DB.PRODUCTS.UPSELL_MAPPING
+(
+SWEATSUIT_COLOR_OR_STYLE varchar(25)
+,UPSELL_PRODUCT_CODE varchar(10)
+);
+
+grant OWNERSHIP on TABLE ZENAS_ATHLEISURE_DB.PRODUCTS.UPSELL_MAPPING to role SYSADMIN;
+
+insert into ZENAS_ATHLEISURE_DB.PRODUCTS.UPSELL_MAPPING
+(
+SWEATSUIT_COLOR_OR_STYLE
+,UPSELL_PRODUCT_CODE 
+)
+VALUES
+('Charcoal Grey','SWT_GRY')
+,('Forest Green','SWT_FGN')
+,('Orange','SWT_ORG')
+,('Pink', 'SWT_PNK')
+,('Red','SWT_RED')
+,('Yellow', 'SWT_YLW');
+
+select * from ZENAS_ATHLEISURE_DB.PRODUCTS.UPSELL_MAPPING 
+
+grant OWNERSHIP on VIEW ZENAS_ATHLEISURE_DB.PRODUCTS.catalog_for_website to role SYSADMIN;
+
+create view catalog_for_website as 
+select color_or_style
+,price
+,direct_url
+,size_list
+,coalesce('BONUS: ' ||  headband_description || ' & ' || wristband_description, 'Consider White, Black or Grey Sweat Accessories')  as upsell_product_desc
+from
+(   select color_or_style, price, direct_url, image_last_modified,image_size
+    ,listagg(sizes_available, ' | ') within group (order by sizes_available) as size_list
+    from catalog
+    group by color_or_style, price, direct_url, image_last_modified, image_size
+) c
+left join upsell_mapping u
+on u.sweatsuit_color_or_style = c.color_or_style
+left join sweatband_coordination sc
+on sc.product_code = u.upsell_product_code
+left join sweatband_product_line spl
+on spl.product_code = sc.product_code
+where price < 200 -- high priced items like vintage sweatsuits aren't a good fit for this website
+and image_size < 1000000 -- large images need to be processed to a smaller size
+;
+
+
+
+select GRADER(step, (actual = expected), actual, expected, description) as graded_results from
+(
+SELECT
+'DLKW04' as step
+ ,( select count(*) 
+  from zenas_athleisure_db.products.catalog_for_website 
+  where upsell_product_desc like '%NUS:%') as actual
+ ,6 as expected
+ ,'Relentlessly resourceful' as description
+); 
+
+----this lab is to use geospatial format-----
+create database MELS_SMOOTHIE_CHALLENGE_DB
+
+drop schema public 
+create schema TRAILS
+list @TRAILS_GEOJSON
+list 
+
+
+
+select $1 from @TRAILS_PARQUET (file_format => FF_PARQUET);
+
+create view CHERRY_CREEK_TRAIL as 
+select 
+ $1:sequence_1 as point_id,
+ $1:trail_name::varchar as trail_name,
+ $1:latitude::number(11,8) as lng, --remember we did a gut check on this data
+ $1:longitude::number(11,8) as lat
+from @trails_parquet
+(file_format => ff_parquet)
+order by point_id;
+
+
+
+
+
+
+
+
+select * from MELS_SMOOTHIE_CHALLENGE_DB.TRAILS.CHERRY_CREEK_TRAIL 
+
+
+select top 100 
+ lng||' '||lat as coord_pair
+,'POINT('||coord_pair||')' as trail_point
+from cherry_creek_trail;
+
+create or replace view cherry_creek_trail as
+select 
+ $1:sequence_1 as point_id,
+ $1:trail_name::varchar as trail_name,
+ $1:latitude::number(11,8) as lng,
+ $1:longitude::number(11,8) as lat,
+ lng||' '||lat as coord_pair
+from @trails_parquet
+(file_format => ff_parquet)
+order by point_id;
+
+
+select * from cherry_creek_trail 
+
+select 
+'LINESTRING('||
+listagg(coord_pair, ',') 
+within group (order by point_id)
+||')' as my_linestring
+from cherry_creek_trail
+group by trail_name;
+
+--manipulate data in Json format 
+select $1 from @trails_geojson
+(file_format =>FF_JSON)
+
+create view DENVER_AREA_TRAILS as 
+select
+$1:features[0]:properties:Name::string as feature_name
+,$1:features[0]:geometry:coordinates::string as feature_coordinates
+,$1:features[0]:geometry::string as geometry
+,$1:features[0]:properties::string as feature_properties
+,$1:crs:properties:name::string as specs
+,$1 as whole_object
+from @trails_geojson (file_format => ff_json);
+
+-----------------------------------------------------------------------------------
+create or replace view DENVER_AREA_TRAILS( 
+FEATURE_NAME ,
+FEATURE_COORDINATES,
+GEOMETRY,
+TRAIL_LENGTH,
+FEATURE_PROPERTIES,
+SPECS,
+WHOLE_OBJECT) as 
+select 
+$1:features[0]:properties:Name::string as feature_name
+,$1:features[0]:geometry:coordinates::string as feature_coordinates
+,$1:features[0]:geometry::string as geometry
+,st_length(to_geography(geometry)) as trail_length
+,$1:features[0]:properties::string as feature_properties
+,$1:crs:properties:name::string as specs
+,$1 as whole_object
+from @trails_geojson (file_format => ff_json);
+
+select * from DENVER_AREA_TRAILS
+
+select feature_name, geometry, trail_length
+from DENVER_AREA_TRAILS
+union all
+select feature_name, geometry, trail_length
+from DENVER_AREA_TRAILS_2;
+
+
+create view TRAILS_AND_BOUNDARIES as 
+select feature_name
+, to_geography(geometry) as my_linestring
+, st_xmin(my_linestring) as min_eastwest
+, st_xmax(my_linestring) as max_eastwest
+, st_ymin(my_linestring) as min_northsouth
+, st_ymax(my_linestring) as max_northsouth
+, trail_length
+from DENVER_AREA_TRAILS
+union all
+select feature_name
+, to_geography(geometry) as my_linestring
+, st_xmin(my_linestring) as min_eastwest
+, st_xmax(my_linestring) as max_eastwest
+, st_ymin(my_linestring) as min_northsouth
+, st_ymax(my_linestring) as max_northsouth
+, trail_length
+from DENVER_AREA_TRAILS_2;
+select * from TRAILS_AND_BOUNDARIES 
+
+-------------------------------------------------------------------------------------------------------
+select GRADER(step, (actual = expected), actual, expected, description) as graded_results from
+(
+ SELECT
+  'DLKW07' as step
+   ,( select round(max(max_northsouth))
+      from MELS_SMOOTHIE_CHALLENGE_DB.TRAILS.TRAILS_AND_BOUNDARIES)
+      as actual
+ ,40 as expected
+ ,'Trails Northern Extent' as description
+ ); 
+
+ create schema  LOCATIONS
+
+ select * from MELS_SMOOTHIE_CHALLENGE_DB.TRAILS.CHERRY_CREEK_TRAIL
+
+alter view MELS_SMOOTHIE_CHALLENGE_DB.TRAILS.CHERRY_CREEK_TRAIL rename to MELS_SMOOTHIE_CHALLENGE_DB.TRAILS.V_CHERRY_CREEK_TRAIL
+
+create or replace external table T_CHERRY_CREEK_TRAIL(
+	my_filename varchar(50) as (metadata$filename::varchar(50))
+) 
+location= @trails_parquet
+auto_refresh = true
+file_format = (type = parquet);
+
+select get_ddl('view','mels_smoothie_challenge_db.trails.v_cherry_creek_trail');
+
+
+create or replace view V_CHERRY_CREEK_TRAIL(
+	POINT_ID,
+	TRAIL_NAME,
+	LNG,
+	LAT,
+	COORD_PAIR
+) as
+select 
+ $1:sequence_1 as point_id,
+ $1:trail_name::varchar as trail_name,
+ $1:latitude::number(11,8) as lng,
+ $1:longitude::number(11,8) as lat,
+ lng||' '||lat as coord_pair
+from @trails_parquet
+(file_format => ff_parquet)
+order by point_id;
+
+
+
+-------Creation of External table from the stage----------------------------------------
+ 
+create or replace external table mels_smoothie_challenge_db.trails.T_CHERRY_CREEK_TRAIL(
+	POINT_ID number as ($1:sequence_1::number),
+	TRAIL_NAME varchar(50) as  ($1:trail_name::varchar),
+	LNG number(11,8) as ($1:latitude::number(11,8)),
+	LAT number(11,8) as ($1:longitude::number(11,8)),
+	COORD_PAIR varchar(50) as (lng::varchar||' '||lat::varchar)
+) 
+location= @mels_smoothie_challenge_db.trails.trails_parquet
+auto_refresh = true
+file_format = mels_smoothie_challenge_db.trails.ff_parquet;
+---------------------------------------------------------------------------------------------
+create secure materialized view SMV_CHERRY_CREEK_TRAIL as select * from T_CHERRY_CREEK_TRAIL
+
+select * from T_CHERRY_CREEK_TRAIL
+----------------------------------------------------------------------------------------------
+
+select util_db.public.greeting('renaudinjude@gmail.com', 'Jude','','Renaudin'); 
+
+SELECT CURRENT_ACCOUNT(); 
