@@ -1,0 +1,260 @@
+alter user jrenaudin set default_role = 'SYSADMIN';
+alter user jrenaudin set default_warehouse = 'COMPUTE_WH';
+alter user jrenaudin set default_namespace = 'UTIL_DB.PUBLIC';
+create database AGS_GAME_AUDIENCE
+create schema RAW
+drop schema PUBLIC
+---------------------query data from datalake using external staging and file format-------------------------
+list @UNI_KISHORE
+select $1 from @UNI_KISHORE/kickoff(file_format=>ff_json_logs) 
+select $1 from @UNI_KISHORE/updated_feed(file_format=>ff_json_logs)
+--------------------load data into table with variant column-------------------------------
+select * from AGS_GAME_AUDIENCE.RAW.GAME_LOGS
+copy into GAME_LOGS from @UNI_KISHORE/updated_feed file_format= (format_name=ff_json_logs)
+select * from GAME_LOGS
+----------------------------select variant JSON data from external stage----------------------
+select 
+ raw_log:agent::text as Agent
+,raw_log:datetime_iso8601::TIMESTAMP_NTZ as Datetime_iso8601
+,raw_log:user_event::text as User_event
+,raw_log:user_login::text as User_login
+, raw_log
+from GAME_LOGS
+
+create or replace view LOGS as select 
+ raw_log:user_event::text as User_event
+,raw_log:user_login::text as User_login
+ ,raw_log:datetime_iso8601::TIMESTAMP_NTZ as Datetime_iso8601
+,raw_log:ip_address::text AS IP_ADDRESS
+,raw_log
+from GAME_LOGS WHERE raw_log:ip_address::text IS NOT NULL
+
+
+select * from LOGS where user_login ILIKE '%Prajina%'
+
+SELECT logs.ip_address
+, logs.user_login
+, logs.user_event
+, logs.datetime_iso8601
+, city
+, region
+, country
+, timezone 
+,convert_timezone('UTC',timezone,logs.datetime_iso8601)as GAME_EVENT_LTZ
+,dayname(GAME_EVENT_LTZ)as Day
+,hour(GAME_EVENT_LTZ) as Hour
+from AGS_GAME_AUDIENCE.RAW.LOGS logs
+JOIN IPINFO_GEOLOC.demo.location loc 
+ON IPINFO_GEOLOC.public.TO_JOIN_KEY(logs.ip_address) = loc.join_key
+AND IPINFO_GEOLOC.public.TO_INT(logs.ip_address) 
+BETWEEN start_ip_int AND end_ip_int; 
+
+create table ags_game_audience.raw.time_of_day_lu
+(  hour number
+   ,tod_name varchar(25)
+);
+select tod_name ,listagg(hour,',') from time_of_day_lu group by tod_name
+------------------------load the enhanced table----------------------------
+create table ags_game_audience.enhanced.logs_enhanced as(
+ 
+ SELECT logs.ip_address
+, logs.user_login as  GAMER_NAME
+, logs.user_event as GAME_EVENT_NAME
+, logs.datetime_iso8601 as GAME_EVENT_UTC
+, city
+, region
+, country
+, timezone as GAMER_LTZ_NAME
+,convert_timezone('UTC',timezone,logs.datetime_iso8601)as GAME_EVENT_LTZ
+,dayname(GAME_EVENT_LTZ)as DOW_NAME
+,TOD_NAME
+from AGS_GAME_AUDIENCE.RAW.LOGS logs
+JOIN IPINFO_GEOLOC.demo.location loc 
+ON IPINFO_GEOLOC.public.TO_JOIN_KEY(logs.ip_address) = loc.join_key
+JOIN TIME_OF_DAY_LU tof ON date_part(HOUR,GAME_EVENT_LTZ) =tof.hour
+AND IPINFO_GEOLOC.public.TO_INT(logs.ip_address) 
+BETWEEN start_ip_int AND end_ip_int
+
+)
+select * from enhanced.logs_enhanced
+-----------------------------------------------------------------------
+--You have to run this grant or you won't be able to test your tasks while in SYSADMIN role
+--this is true even if SYSADMIN owns the task!!
+grant execute task on account to role SYSADMIN;
+
+--Now you should be able to run the task, even if your role is set to SYSADMIN
+execute task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED;
+
+--the SHOW command might come in handy to look at the task 
+show tasks in account;
+
+--you can also look at any task more in depth using DESCRIBE
+describe task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED;
+-------------------------------------------------------------------------------
+CREATE OR REPLACE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED 
+WAREHOUSE =COMPUTE_WH
+SCHEDULE ='5 minute'
+as 
+insert into AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED(
+ SELECT logs.ip_address
+, logs.user_login as  GAMER_NAME
+, logs.user_event as GAME_EVENT_NAME
+, logs.datetime_iso8601 as GAME_EVENT_UTC
+, city
+, region
+, country
+, timezone as GAMER_LTZ_NAME
+,convert_timezone('UTC',timezone,logs.datetime_iso8601)as GAME_EVENT_LTZ
+,dayname(GAME_EVENT_LTZ)as DOW_NAME
+,TOD_NAME
+from AGS_GAME_AUDIENCE.RAW.LOGS logs
+JOIN IPINFO_GEOLOC.demo.location loc 
+ON IPINFO_GEOLOC.public.TO_JOIN_KEY(logs.ip_address) = loc.join_key
+JOIN TIME_OF_DAY_LU tof ON date_part(HOUR,GAME_EVENT_LTZ) =tof.hour
+AND IPINFO_GEOLOC.public.TO_INT(logs.ip_address) 
+BETWEEN start_ip_int AND end_ip_int)
+--------------check how many row inside the table------------
+select count(*) from AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED
+---------------execute the task------------------------------
+execute task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED
+----------------------AN UPDATE MERGE----------------------------------------
+MERGE INTO ENHANCED.LOGS_ENHANCED e
+USING RAW.LOGS r
+ON r.user_login = e.GAMER_NAME
+and r.DATETIME_ISO8601 =e.GAME_EVENT_UTC
+and r.USER_EVENT =e.GAME_EVENT_NAME
+WHEN MATCHED THEN
+UPDATE SET IP_ADDRESS = 'Hey I updated matching rows!';
+--------------------------AN INSERT MERGE---------------------------------------
+MERGE INTO ENHANCED.LOGS_ENHANCED e
+USING (
+ SELECT logs.ip_address
+, logs.user_login as  GAMER_NAME
+, logs.user_event as GAME_EVENT_NAME
+, logs.datetime_iso8601 as GAME_EVENT_UTC
+, city
+, region
+, country
+, timezone as GAMER_LTZ_NAME
+,convert_timezone('UTC',timezone,logs.datetime_iso8601)as GAME_EVENT_LTZ
+,dayname(GAME_EVENT_LTZ)as DOW_NAME
+,TOD_NAME
+from AGS_GAME_AUDIENCE.RAW.LOGS logs
+JOIN IPINFO_GEOLOC.demo.location loc 
+ON IPINFO_GEOLOC.public.TO_JOIN_KEY(logs.ip_address) = loc.join_key
+JOIN TIME_OF_DAY_LU tof ON date_part(HOUR,GAME_EVENT_LTZ) =tof.hour
+AND IPINFO_GEOLOC.public.TO_INT(logs.ip_address) 
+BETWEEN start_ip_int AND end_ip_int
+) r
+ON r.GAMER_NAME = e.GAMER_NAME
+and r.GAME_EVENT_UTC =e.GAME_EVENT_UTC
+and r.GAME_EVENT_NAME =e.GAME_EVENT_NAME
+WHEN NOT MATCHED THEN
+INSERT (IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+VALUES(IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+
+SELECT COUNT(*) FROM AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED ;
+TRUNCATE TABLE AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED
+-----------------------CREATE TASK FOR THE MERGE--------------------------------
+CREATE OR REPLACE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED
+WAREHOUSE =COMPUTE_WH
+SCHEDULE ='5 minute'
+as 
+MERGE INTO ENHANCED.LOGS_ENHANCED e
+USING (
+ SELECT logs.ip_address
+, logs.user_login as  GAMER_NAME
+, logs.user_event as GAME_EVENT_NAME
+, logs.datetime_iso8601 as GAME_EVENT_UTC
+, city
+, region
+, country
+, timezone as GAMER_LTZ_NAME
+,convert_timezone('UTC',timezone,logs.datetime_iso8601)as GAME_EVENT_LTZ
+,dayname(GAME_EVENT_LTZ)as DOW_NAME
+,TOD_NAME
+from AGS_GAME_AUDIENCE.RAW.LOGS logs
+JOIN IPINFO_GEOLOC.demo.location loc 
+ON IPINFO_GEOLOC.public.TO_JOIN_KEY(logs.ip_address) = loc.join_key
+JOIN TIME_OF_DAY_LU tof ON date_part(HOUR,GAME_EVENT_LTZ) =tof.hour
+AND IPINFO_GEOLOC.public.TO_INT(logs.ip_address) 
+BETWEEN start_ip_int AND end_ip_int
+) r
+ON r.GAMER_NAME = e.GAMER_NAME
+and r.GAME_EVENT_UTC =e.GAME_EVENT_UTC
+and r.GAME_EVENT_NAME =e.GAME_EVENT_NAME
+WHEN NOT MATCHED THEN
+INSERT (IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+VALUES(IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+
+EXECUTE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED;
+SELECT COUNT(*) FROM AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED ;
+-----------------------------------------CREATE NEW DATA PIPELINE USING TASK TO LOAD DATA TO STAGING---------------------------------------------
+CREATE OR REPLACE TASK AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES
+USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+SCHEDULE ='5 minute'
+as 
+copy into AGS_GAME_AUDIENCE.RAW.PIPELINE_LOGS from @AGS_GAME_AUDIENCE.RAW.UNI_KISHORE_PIPELINE file_format = (format_name = AGS_GAME_AUDIENCE.RAW.FF_JSON_LOGS);
+EXECUTE TASK AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES;
+---------------------------------------A new task to load the data FROM STAGING TRANSFORM IT AND LOAD INTO TABLE-------------------------------------------------
+CREATE OR REPLACE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED
+WAREHOUSE =COMPUTE_WH
+after AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES
+as 
+MERGE INTO ENHANCED.LOGS_ENHANCED e
+USING (
+ SELECT logs.ip_address
+, logs.user_login as  GAMER_NAME
+, logs.user_event as GAME_EVENT_NAME
+, logs.datetime_iso8601 as GAME_EVENT_UTC
+, city
+, region
+, country
+, timezone as GAMER_LTZ_NAME
+,convert_timezone('UTC',timezone,LOGS.datetime_iso8601)as GAME_EVENT_LTZ
+,dayname(GAME_EVENT_LTZ)as DOW_NAME
+,TOD_NAME
+from AGS_GAME_AUDIENCE.RAW.PL_LOGS logs
+JOIN IPINFO_GEOLOC.demo.location loc 
+ON IPINFO_GEOLOC.public.TO_JOIN_KEY(logs.ip_address) = loc.join_key
+JOIN TIME_OF_DAY_LU tof ON date_part(HOUR,GAME_EVENT_LTZ) =tof.hour
+AND IPINFO_GEOLOC.public.TO_INT(logs.ip_address) 
+BETWEEN start_ip_int AND end_ip_int
+) r
+ON r.GAMER_NAME = e.GAMER_NAME
+and r.GAME_EVENT_UTC =e.GAME_EVENT_UTC
+and r.GAME_EVENT_NAME =e.GAME_EVENT_NAME
+WHEN NOT MATCHED THEN
+INSERT (IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+VALUES(IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+EXECUTE TASK AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES;--THE ROOT 
+EXECUTE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED;--THE CHILD
+SELECT COUNT(*)FROM AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED
+-------------------TO START TASK AUTOMATICALLY-----------------------
+--Turning on a task is done with a RESUME command
+alter task AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES resume;
+alter task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED resume;
+--------------------TO STOP THE TASKS---------------------------------
+--Keep this code handy for shutting down the tasks each day
+alter task AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES suspend;
+alter task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED suspend;
+----------------------------------------------------------------------
+use role accountadmin;
+grant EXECUTE MANAGED TASK on account to SYSADMIN;
+USE ROLE SYSADMIN
+-------------------Load the table with new metadata----------------------------------------
+copy into AGS_GAME_AUDIENCE.RAW.ED_PIPELINE_LOGS from
+(
+ SELECT 
+    METADATA$FILENAME as log_file_name 
+  , METADATA$FILE_ROW_NUMBER as log_file_row_id 
+  , current_timestamp(0) as load_ltz 
+  , get($1,'datetime_iso8601')::timestamp_ntz as DATETIME_ISO8601
+  , get($1,'user_event')::text as USER_EVENT
+  , get($1,'user_login')::text as USER_LOGIN
+  , get($1,'ip_address')::text as IP_ADDRESS    
+  FROM @AGS_GAME_AUDIENCE.RAW.UNI_KISHORE_PIPELINE
+)
+file_format = (format_name = ff_json_logs);
+------------------------------------------------------------------------------------------
+
