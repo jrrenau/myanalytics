@@ -162,7 +162,8 @@ SCHEDULE ='5 minute'
 as 
 MERGE INTO ENHANCED.LOGS_ENHANCED e
 USING (
- SELECT logs.ip_address
+ SELECT 
+ logs.ip_address
 , logs.user_login as  GAMER_NAME
 , logs.user_event as GAME_EVENT_NAME
 , logs.datetime_iso8601 as GAME_EVENT_UTC
@@ -203,7 +204,8 @@ after AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES
 as 
 MERGE INTO ENHANCED.LOGS_ENHANCED e
 USING (
- SELECT logs.ip_address
+ SELECT 
+ logs.ip_address
 , logs.user_login as  GAMER_NAME
 , logs.user_event as GAME_EVENT_NAME
 , logs.datetime_iso8601 as GAME_EVENT_UTC
@@ -227,22 +229,23 @@ and r.GAME_EVENT_NAME =e.GAME_EVENT_NAME
 WHEN NOT MATCHED THEN
 INSERT (IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
 VALUES(IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+----------------------------------------------------------------------------------------------------------------------------------------------------
 EXECUTE TASK AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES;--THE ROOT 
 EXECUTE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED;--THE CHILD
 SELECT COUNT(*)FROM AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED
--------------------TO START TASK AUTOMATICALLY-----------------------
+-------------------TO START TASK AUTOMATICALLY------------------------------------------------------------------------------------------------------
 --Turning on a task is done with a RESUME command
 alter task AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES resume;
 alter task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED resume;
---------------------TO STOP THE TASKS---------------------------------
+--------------------TO STOP THE TASKS----------------------------------------------------------------------------------------------------------------
 --Keep this code handy for shutting down the tasks each day
 alter task AGS_GAME_AUDIENCE.RAW.GET_NEW_FILES suspend;
 alter task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED suspend;
-----------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------------------
 use role accountadmin;
 grant EXECUTE MANAGED TASK on account to SYSADMIN;
 USE ROLE SYSADMIN
--------------------Load the table with new metadata----------------------------------------
+-------------------Load the raw table with new metadata-----------------------------------------------------------------------------------------------
 copy into AGS_GAME_AUDIENCE.RAW.ED_PIPELINE_LOGS from
 (
  SELECT 
@@ -256,5 +259,128 @@ copy into AGS_GAME_AUDIENCE.RAW.ED_PIPELINE_LOGS from
   FROM @AGS_GAME_AUDIENCE.RAW.UNI_KISHORE_PIPELINE
 )
 file_format = (format_name = ff_json_logs);
-------------------------------------------------------------------------------------------
+---------------------------------Using pipe to get the files from bucket to landing zone-------------
+
+CREATE OR REPLACE PIPE PIPE_GET_NEW_FILES
+auto_ingest=true
+aws_sns_topic='arn:aws:sns:us-west-2:321463406630:dngw_topic'
+AS 
+COPY INTO ED_PIPELINE_LOGS
+FROM (
+    SELECT 
+    METADATA$FILENAME as log_file_name 
+  , METADATA$FILE_ROW_NUMBER as log_file_row_id 
+  , current_timestamp(0) as load_ltz 
+  , get($1,'datetime_iso8601')::timestamp_ntz as DATETIME_ISO8601
+  , get($1,'user_event')::text as USER_EVENT
+  , get($1,'user_login')::text as USER_LOGIN
+  , get($1,'ip_address')::text as IP_ADDRESS    
+  FROM @AGS_GAME_AUDIENCE.RAW.UNI_KISHORE_PIPELINE
+)
+file_format = (format_name = ff_json_logs);
+
+SELECT COUNT(*) FROM AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED ;
+TRUNCATE TABLE AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED
+---------------------------------------ge the data from the raw and updated to Enhanced table-------------------------------
+CREATE OR REPLACE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED
+WAREHOUSE =COMPUTE_WH
+SCHEDULE ='5 minute'
+as 
+MERGE INTO ENHANCED.LOGS_ENHANCED e
+USING (
+ SELECT 
+  logs.ip_address
+, logs.user_login as  GAMER_NAME
+, logs.user_event as GAME_EVENT_NAME
+, logs.datetime_iso8601 as GAME_EVENT_UTC
+, city
+, region
+, country
+, timezone as GAMER_LTZ_NAME
+,convert_timezone('UTC',timezone,logs.datetime_iso8601)as GAME_EVENT_LTZ
+,dayname(GAME_EVENT_LTZ)as DOW_NAME
+,TOD_NAME
+from AGS_GAME_AUDIENCE.RAW.ED_PIPELINE_LOGS logs
+JOIN IPINFO_GEOLOC.demo.location loc 
+ON IPINFO_GEOLOC.public.TO_JOIN_KEY(logs.ip_address) = loc.join_key
+JOIN TIME_OF_DAY_LU tof ON date_part(HOUR,GAME_EVENT_LTZ) =tof.hour
+AND IPINFO_GEOLOC.public.TO_INT(logs.ip_address) 
+BETWEEN start_ip_int AND end_ip_int
+) r
+ON r.GAMER_NAME = e.GAMER_NAME
+and r.GAME_EVENT_UTC =e.GAME_EVENT_UTC
+and r.GAME_EVENT_NAME =e.GAME_EVENT_NAME
+WHEN NOT MATCHED THEN
+INSERT (IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+VALUES(IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME, GAME_EVENT_UTC, CITY, REGION, COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ, DOW_NAME, TOD_NAME)
+---------------------------------------------test the task------------------------------------------------
+SELECT count(*) FROM AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED ;
+alter task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED resume;
+alter task AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED suspend;
+EXECUTE TASK AGS_GAME_AUDIENCE.RAW.LOAD_LOGS_ENHANCED;
+select count(*) from AGS_GAME_AUDIENCE.RAW.ED_PIPELINE_LOGS
+--create a stream that will keep track of changes to the table----------------------------------------------
+create or replace stream ags_game_audience.raw.ed_cdc_stream 
+on table AGS_GAME_AUDIENCE.RAW.ED_PIPELINE_LOGS;
+--look at the stream you created----------------------------------------------------------------------------
+show streams;
+--check to see if any changes are pending (expect FALSE the first time you run it)---------------------------
+--after the Snowpipe loads a new file, expect to see TRUE----------------------------------------------------
+select system$stream_has_data('ed_cdc_stream');
+select * from ags_game_audience.raw.ed_cdc_stream
+--------------------------------------chech the status of the pipe------------------------------------------------------------------------
+select SYSTEM$PIPE_STATUS('PIPE_GET_NEW_FILES');
+--------------------------if you need to pause or unpause your pipe-------------------------------------------
+alter pipe PIPE_GET_NEW_FILES set pipe_execution_paused = true;
+alter pipe PIPE_GET_NEW_FILES set pipe_execution_paused = false;
+---------------------------------------Do the merge on the Enhanced table based on the stream instead when the streams has data--------------------------
+--Create a new task that uses the MERGE you just tested
+create or replace task AGS_GAME_AUDIENCE.RAW.CDC_LOAD_LOGS_ENHANCED
+	USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE='XSMALL'
+	SCHEDULE = '5 minutes'
+    WHEN 
+    system$stream_has_data('ed_cdc_stream')
+	as 
+MERGE INTO AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED e
+USING (
+        SELECT cdc.ip_address 
+        , cdc.user_login as GAMER_NAME
+        , cdc.user_event as GAME_EVENT_NAME
+        , cdc.datetime_iso8601 as GAME_EVENT_UTC
+        , city
+        , region
+        , country
+        , timezone as GAMER_LTZ_NAME
+        , CONVERT_TIMEZONE( 'UTC',timezone,cdc.datetime_iso8601) as game_event_ltz
+        , DAYNAME(game_event_ltz) as DOW_NAME
+        , TOD_NAME
+        from ags_game_audience.raw.ed_cdc_stream cdc
+        JOIN ipinfo_geoloc.demo.location loc 
+        ON ipinfo_geoloc.public.TO_JOIN_KEY(cdc.ip_address) = loc.join_key
+        AND ipinfo_geoloc.public.TO_INT(cdc.ip_address) 
+        BETWEEN start_ip_int AND end_ip_int
+        JOIN AGS_GAME_AUDIENCE.RAW.TIME_OF_DAY_LU tod
+        ON HOUR(game_event_ltz) = tod.hour
+      ) r
+ON r.GAMER_NAME = e.GAMER_NAME
+AND r.GAME_EVENT_UTC = e.GAME_EVENT_UTC
+AND r.GAME_EVENT_NAME = e.GAME_EVENT_NAME 
+WHEN NOT MATCHED THEN 
+INSERT (IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME
+        , GAME_EVENT_UTC, CITY, REGION
+        , COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ
+        , DOW_NAME, TOD_NAME)
+        VALUES
+        (IP_ADDRESS, GAMER_NAME, GAME_EVENT_NAME
+        , GAME_EVENT_UTC, CITY, REGION
+        , COUNTRY, GAMER_LTZ_NAME, GAME_EVENT_LTZ
+        , DOW_NAME, TOD_NAME);
+----------------Resume the task so it is running----------------------------------------------
+alter task AGS_GAME_AUDIENCE.RAW.CDC_LOAD_LOGS_ENHANCED resume;
+alter task AGS_GAME_AUDIENCE.RAW.CDC_LOAD_LOGS_ENHANCED suspend
+EXECUTE TASK AGS_GAME_AUDIENCE.RAW.CDC_LOAD_LOGS_ENHANCED 
+SELECT COUNT(*) FROM AGS_GAME_AUDIENCE.ENHANCED.LOGS_ENHANCED;
+---------------------------------Curated data from enhanced data------------------------------
+
+
 
